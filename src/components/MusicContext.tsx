@@ -52,6 +52,21 @@ interface MusicContextType {
 
 const MusicContext = createContext<MusicContextType | undefined>(undefined);
 
+// Resolve API endpoints dynamically, especially on external static hosts like Vercel
+const getApiUrl = (endpoint: string) => {
+  const isLocalOrPreviewDev = 
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1" ||
+    window.location.hostname.includes("run.app") ||
+    window.location.hostname.includes("aistudio-build") ||
+    window.location.hostname.includes("webcontainer-api");
+
+  // Keep pointing to the live, compiled Cloud Run full-stack container when running on custom domains/Vercel
+  const backendOverride = "https://ais-pre-vieo2kqiebinbcczbwwy2j-627715817369.us-east1.run.app";
+  const baseUrl = isLocalOrPreviewDev ? "" : backendOverride;
+  return `${baseUrl}${endpoint}`;
+};
+
 // YT Player global check
 declare global {
   interface Window {
@@ -216,16 +231,18 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     // Progress poller for Youtube and direct HTML5 audio playbacks
     const interval = setInterval(() => {
-      if (currentTrack && currentTrack.type === "song") {
-        if (currentTrack.audioUrl && audioRef.current) {
+      if (currentTrack) {
+        if (currentTrack.type === "song") {
+          if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function") {
+            try {
+              const state = ytPlayerRef.current.getPlayerState();
+              if (state === 1) { // Playing
+                setProgress(ytPlayerRef.current.getCurrentTime() || 0);
+              }
+            } catch {}
+          }
+        } else if (currentTrack.type === "radio" && audioRef.current) {
           setProgress(audioRef.current.currentTime || 0);
-        } else if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function") {
-          try {
-            const state = ytPlayerRef.current.getPlayerState();
-            if (state === 1) { // Playing
-              setProgress(ytPlayerRef.current.getCurrentTime() || 0);
-            }
-          } catch {}
         }
       }
     }, 500);
@@ -308,44 +325,19 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       }
     } else {
-      // YouTube / Cached MP3 streaming (with direct audioUrl resilient fallback)
-      let resolvedAudioUrl = track.audioUrl;
-      if (!resolvedAudioUrl) {
-        try {
-          const res = await fetch(`/api/resolve-audio?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist)}`);
-          const data = await res.json();
-          if (data.audioUrl) {
-            resolvedAudioUrl = data.audioUrl;
-            track.audioUrl = resolvedAudioUrl; // save on track
-          }
-        } catch (err) {
-          console.error("Failed to dynamically resolve resilient audio:", err);
-        }
+      // YouTube Full Track Streaming
+      // Stop and clear any previous HTML5 Audio (prevents any 30s previews from cutting off playback)
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = "";
       }
 
-      // Play resilient high-fidelity audio stream first
-      if (resolvedAudioUrl && audioRef.current) {
-        try {
-          audioRef.current.src = resolvedAudioUrl;
-          const playPromise = audioRef.current.play();
-          if (playPromise !== undefined) {
-            playPromise.then(() => {
-              setIsPlaying(true);
-            }).catch(playErr => {
-              console.warn("Direct HTML5 audio blocked initially, waiting for user click action:", playErr);
-            });
-          }
-        } catch (audioErr) {
-          console.error("HTML5 direct reproduction error:", audioErr);
-        }
-      }
-
-      // Concurrently resolve video ID
+      // Resolve video ID from backend (using getApiUrl for robust Vercel support)
       let ytId = track.youtubeId;
       if (!ytId) {
         isVideoLoadingRef.current = true;
         try {
-          const res = await fetch(`/api/yt-resolve?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist)}`);
+          const res = await fetch(getApiUrl(`/api/yt-resolve?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist)}`));
           const data = await res.json();
           if (data.youtubeId) {
             ytId = data.youtubeId;
@@ -358,23 +350,15 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isVideoLoadingRef.current = false;
       }
 
-      // Sync concealed video terminal player
+      // Sync and play unmuted full YouTube song!
       if (ytPlayerRef.current && typeof ytPlayerRef.current.loadVideoById === "function") {
         try {
           ytPlayerRef.current.loadVideoById(ytId);
-          if (resolvedAudioUrl) {
-            // Mute background visual YouTube video to avoid redundant duplicate audio echo
-            ytPlayerRef.current.mute();
-          } else {
-            ytPlayerRef.current.unMute();
-            ytPlayerRef.current.setVolume(volume * 100);
-          }
+          ytPlayerRef.current.unMute();
+          ytPlayerRef.current.setVolume(volume * 100);
           ytPlayerRef.current.playVideo();
           ytPlayerRef.current.setPlaybackRate(speed);
-          
-          if (!resolvedAudioUrl) {
-            setIsPlaying(true);
-          }
+          setIsPlaying(true);
         } catch (err) {
           console.error("Concealed background video play error", err);
         }
@@ -386,7 +370,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const togglePlay = () => {
     if (!currentTrack) return;
 
-    const hasAudioElement = currentTrack.type === "radio" || currentTrack.audioUrl;
+    const hasAudioElement = currentTrack.type === "radio";
 
     if (hasAudioElement && audioRef.current) {
       if (isPlaying) {
@@ -448,21 +432,10 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!currentTrack) return;
     if (currentTrack.type === "radio") return; // cannot seek live stream
 
-    if (currentTrack.audioUrl && audioRef.current) {
-      try {
-        audioRef.current.currentTime = seconds;
-        setProgress(seconds);
-      } catch (e) {
-        console.error("Seek error in HTML5 Audio:", e);
-      }
-    }
-
     if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === "function") {
       try {
         ytPlayerRef.current.seekTo(seconds, true);
-        if (!currentTrack.audioUrl) {
-          setProgress(seconds);
-        }
+        setProgress(seconds);
       } catch {}
     }
   };
@@ -506,7 +479,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     setIsSearchLoading(true);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      const res = await fetch(getApiUrl(`/api/search?q=${encodeURIComponent(q)}`));
       const body = await res.json();
       setSearchResults(body.data || []);
     } catch {
@@ -521,7 +494,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setRadioGenre(genre);
     setIsRadioLoading(true);
     try {
-      const res = await fetch(`/api/radios?genre=${encodeURIComponent(genre)}`);
+      const res = await fetch(getApiUrl(`/api/radios?genre=${encodeURIComponent(genre)}`));
       const json = await res.json();
       setRadioStations(json.data || []);
     } catch (e) {
@@ -539,7 +512,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
     setIsLyricsLoading(true);
     try {
-      const response = await fetch("/api/lyrics", {
+      const response = await fetch(getApiUrl("/api/lyrics"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: track.title, artist: track.artist }),
@@ -558,7 +531,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setIsRecsLoading(true);
     try {
       const recent = historyList.slice(0, 5);
-      const response = await fetch("/api/recommendations", {
+      const response = await fetch(getApiUrl("/api/recommendations"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: track.title, artist: track.artist, recentTracks: recent }),

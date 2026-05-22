@@ -8,6 +8,17 @@ const PORT = 3000;
 
 app.use(express.json());
 
+// Enable CORS for external client deployments (like Vercel production hosting)
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // Initialize Gemini Client safely
 let ai: GoogleGenAI | null = null;
 try {
