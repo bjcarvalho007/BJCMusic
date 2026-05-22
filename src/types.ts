@@ -14,6 +14,7 @@ export interface Track {
   lyrics?: string;
   type: 'song' | 'radio';
   radioUrl?: string; // used for live radio streaming
+  audioUrl?: string; // used for highly resilient direct MP3 audio playback
 }
 
 export interface Playlist {

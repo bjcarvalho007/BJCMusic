@@ -116,6 +116,11 @@ app.get("/api/search", async (req, res) => {
     }
     const result = await response.json();
     
+    // Check if Deezer returned an error block inside HTTP 200 (e.g. rate-limited, blocked, etc.)
+    if (result.error) {
+      throw new Error(`Deezer API returned error: ${result.error.message || JSON.stringify(result.error)}`);
+    }
+
     // Transform to our Track model schema
     const tracks = (result.data || []).map((t: any) => ({
       id: `dz_${t.id}`,
@@ -125,7 +130,8 @@ app.get("/api/search", async (req, res) => {
       coverUrl: t.album.cover_medium || t.album.cover_big || "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?w=400",
       youtubeId: "", // Will be resolved dynamically when selected
       duration: t.duration,
-      type: 'song'
+      type: 'song',
+      audioUrl: t.preview // Mapping direct high-fidelity audio preview for resilient HTML5 rendering
     }));
 
     // Combine local catalog matches to guarantee playability at the very top of search results
@@ -136,13 +142,56 @@ app.get("/api/search", async (req, res) => {
       }
     });
 
+    // If matches are completely empty, guarantee rich outcomes by falling back to our high-fidelity local catalog
+    if (combinedTracks.length === 0) {
+      return res.json({ data: LOCAL_SONGS_CATALOG, isFallback: true });
+    }
+
     res.json({ data: combinedTracks });
   } catch (error: any) {
     console.error("Search error, falling back to local matches:", error);
-    // If the external network failed or is blocked, return the high-fidelity local catalog matches, or the full catalog if no specific match
+    // If the external network failed, is blocked, or is throttled, return the high-fidelity local catalog matches, or the full catalog
     const fallbackResults = localMatches.length > 0 ? localMatches : LOCAL_SONGS_CATALOG;
     res.json({ data: fallbackResults, isFallback: true });
   }
+});
+
+// API: Direct MP3 Audio Stream Resolver
+app.get("/api/resolve-audio", async (req, res) => {
+  const title = req.query.title as string || "";
+  const artist = req.query.artist as string || "";
+  if (!title || !artist) {
+    return res.status(400).json({ error: "Missing title or artist param" });
+  }
+
+  // Check if we have it already defined in our catalogue matching
+  const catalogMatch = LOCAL_SONGS_CATALOG.find(t => 
+    t.title.toLowerCase() === title.toLowerCase() && 
+    t.artist.toLowerCase() === artist.toLowerCase()
+  );
+  if (catalogMatch && (catalogMatch as any).audioUrl) {
+    return res.json({ audioUrl: (catalogMatch as any).audioUrl });
+  }
+
+  try {
+    const searchUrl = `https://api.deezer.com/search?q=${encodeURIComponent(`${title} ${artist}`)}&limit=1`;
+    const response = await fetch(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+    if (response.ok) {
+      const result = await response.json();
+      if (result.data && result.data[0] && result.data[0].preview) {
+        return res.json({ audioUrl: result.data[0].preview });
+      }
+    }
+  } catch (err) {
+    console.error("Failed to dynamically resolve preview audio url:", err);
+  }
+
+  // Absolute safety sandbox fallback - beautiful royalty-free music that always plays
+  res.json({ audioUrl: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" });
 });
 
 // API: YouTube Video Resolver using Google Search grounding via Gemini
@@ -188,10 +237,25 @@ app.get("/api/yt-resolve", async (req, res) => {
         ytCache[cacheKey] = videoId;
         console.log(`Resolved youtubeId for "${title}" - "${artist}" and cached: ${videoId}`);
       } else {
-        console.warn(`No Youtube ID match, raw text returned: ${rawText}`);
+        throw new Error(`Invalid text: ${rawText}`);
       }
     } catch (err) {
-      console.error("Gemini failed to resolve Youtube ID, using fallback fetch.", err);
+      console.warn("Gemini with search grounding failed or restricted, trying direct prompt query fallback...", err);
+      try {
+        const fallbackResponse = await ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: `What is the official 11-character YouTube video ID for the song "${title}" by "${artist}"? Output ONLY the 11-character ID (like dQw4w9WgXcQ or H5v3kku4y6Q). No formatting, no markdown, no other words.`,
+        });
+        const rawText = fallbackResponse.text || "";
+        const matches = rawText.match(/([a-zA-Z0-9_-]{11})/);
+        if (matches && matches[1]) {
+          videoId = matches[1];
+          ytCache[cacheKey] = videoId;
+          console.log(`Resolved (fallback direct Gemini) youtubeId for "${title}" - "${artist}": ${videoId}`);
+        }
+      } catch (fallbackErr) {
+        console.error("Direct fallback also failed. Using steady lo-fi default loop.", fallbackErr);
+      }
     }
   }
 
@@ -388,6 +452,30 @@ Respond directly with the lyrics text. If you do not know the exact lyrics, gene
   });
 });
 
+// Set up dynamic preload of local catalog sound previews via Deezer
+async function preloadLocalCatalogPreviews() {
+  console.log("Preloading BJCmusic Local Catalog Audio Previews...");
+  for (const song of LOCAL_SONGS_CATALOG) {
+    try {
+      const searchUrl = `https://api.deezer.com/search?q=${encodeURIComponent(`${song.title} ${song.artist}`)}&limit=1`;
+      const res = await fetch(searchUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data && json.data[0] && json.data[0].preview) {
+          (song as any).audioUrl = json.data[0].preview;
+          console.log(`Preloaded direct audio to catalog for: "${song.title}"`);
+        }
+      }
+    } catch (err) {
+      console.warn(`Could not preload audio preview for ${song.title}:`, err);
+    }
+  }
+}
+
 // Implement Vite server integration for local development or serve compiled build
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
@@ -407,6 +495,8 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`BJCmusic Full-Stack Server running on http://localhost:${PORT}`);
+    // Start asynchronous pre-fetching of direct sample streams
+    preloadLocalCatalogPreviews().catch(err => console.error("Catalog preload failed:", err));
   });
 }
 
