@@ -153,58 +153,62 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
     }
 
-    // Set up global player callback
-    window.onYouTubeIframeAPIReady = () => {
-      // Create off-screen dynamic player placeholder
-      const placeholder = document.createElement("div");
-      placeholder.id = "bjcmusic-yt-player-target";
-      placeholder.style.position = "absolute";
-      placeholder.style.left = "-9999px";
-      placeholder.style.top = "-9999px";
-      placeholder.style.width = "1px";
-      placeholder.style.height = "1px";
-      placeholder.style.opacity = "0px";
-      document.body.appendChild(placeholder);
+    // Set up global player callback with progressive retry to bind to React DOM target
+    const initPlayer = () => {
+      const target = document.getElementById("bjcmusic-yt-player-target");
+      if (!target) {
+        setTimeout(initPlayer, 150);
+        return;
+      }
 
-      ytPlayerRef.current = new window.YT.Player("bjcmusic-yt-player-target", {
-        height: "1",
-        width: "1",
-        videoId: "jfKfPfyJRdk", // starting video
-        playerVars: {
-          autoplay: 0,
-          controls: 0,
-          disablekb: 1,
-          fs: 0,
-          rel: 0,
-          modestbranding: 1,
-        },
-        events: {
-          onReady: () => {
-            console.log("Concealed YouTube player ready.");
-            if (ytPlayerRef.current) {
-              ytPlayerRef.current.setVolume((volume * 100));
-            }
+      try {
+        ytPlayerRef.current = new window.YT.Player("bjcmusic-yt-player-target", {
+          height: "100%",
+          width: "100%",
+          videoId: "jfKfPfyJRdk", // starting neutral lofi video
+          playerVars: {
+            autoplay: 0,
+            controls: 1, // Let users interact directly to bypass strict browser autoplay limits
+            disablekb: 1,
+            fs: 1,
+            rel: 0,
+            modestbranding: 1,
+            origin: window.location.origin,
+            playsinline: 1,
           },
-          onStateChange: (event: any) => {
-            // event.data matches: 1 = Playing, 2 = Paused, 0 = Ended
-            if (event.data === 1) {
-              setIsPlaying(true);
-              const dur = ytPlayerRef.current.getDuration() || 0;
-              setDuration(dur);
-            } else if (event.data === 2) {
-              setIsPlaying(false);
-            } else if (event.data === 0) {
-              // Video ended -> Autoplay trigger next
-              nextTrack();
-            }
+          events: {
+            onReady: () => {
+              console.log("YouTube Video Terminal player ready.");
+              if (ytPlayerRef.current) {
+                ytPlayerRef.current.setVolume(volume * 100);
+              }
+            },
+            onStateChange: (event: any) => {
+              // 1 = Playing, 2 = Paused, 0 = Ended
+              if (event.data === 1) {
+                setIsPlaying(true);
+                const dur = ytPlayerRef.current.getDuration() || 0;
+                setDuration(dur);
+              } else if (event.data === 2) {
+                setIsPlaying(false);
+              } else if (event.data === 0) {
+                nextTrack();
+              }
+            },
           },
-        },
-      });
+        });
+      } catch (err) {
+        console.error("Failed to construct YouTube player:", err);
+      }
+    };
+
+    window.onYouTubeIframeAPIReady = () => {
+      initPlayer();
     };
 
     // If script is already compiled ready
     if (window.YT && window.YT.Player) {
-      window.onYouTubeIframeAPIReady();
+      initPlayer();
     }
 
     // Progress poller for Youtube

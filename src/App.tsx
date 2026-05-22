@@ -52,6 +52,7 @@ const MainLayout: React.FC = () => {
   const [isMuted, setIsMuted] = useState(false);
   const [prevVolume, setPrevVolume] = useState(0.8);
   const [showSyncTip, setShowSyncTip] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(true);
 
   // Mute volume toggle
   const handleMuteToggle = () => {
@@ -375,6 +376,31 @@ const MainLayout: React.FC = () => {
           <FullscreenPlayer onClose={() => setIsFullscreenOpen(false)} />
         )}
       </AnimatePresence>
+
+      {/* 6. CYBERPUNK VIDEO TERMINAL / VISUALIZER */}
+      <div 
+        className={`fixed bottom-24 right-4 z-40 bg-[#08080dfa] border border-white/5 rounded-2xl shadow-2xl transition-all duration-300 overflow-hidden flex flex-col ${
+          showTerminal ? 'w-64 h-48 opacity-100 scale-100' : 'w-48 h-10 opacity-75 scale-100 hover:opacity-100'
+        }`}
+      >
+        <div 
+          onClick={() => setShowTerminal(!showTerminal)}
+          className="flex items-center justify-between px-3.5 py-2.5 cursor-pointer bg-black/40 border-b border-white/5 hover:bg-white/5 transition select-none"
+        >
+          <span className="text-[10px] uppercase tracking-widest text-[#2fcf77] font-bold flex items-center gap-1.5 font-mono">
+            <Disc size={11} className={`text-neon-green ${isPlaying ? 'animate-spin' : ''}`} />
+            {currentTrack ? "VÍDEO TERMINAL" : "SINAL PRONTO"}
+          </span>
+          <button className="text-[9px] text-[#2fcf77]/80 hover:text-white font-mono font-bold uppercase">
+            {showTerminal ? "[ MINIMIZAR ]" : "[ EXPANDIR ]"}
+          </button>
+        </div>
+        
+        {/* The persistent YouTube iframe mount point */}
+        <div className={`flex-1 bg-black relative ${showTerminal ? 'block' : 'hidden'}`}>
+          <div id="bjcmusic-yt-player-target" className="absolute inset-0 w-full h-full pointer-events-auto" />
+        </div>
+      </div>
 
     </div>
   );

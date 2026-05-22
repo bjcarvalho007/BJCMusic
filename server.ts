@@ -30,29 +30,87 @@ try {
 
 // In-Memory cache for YouTube Resolving (speeds up double-play)
 const ytCache: Record<string, string> = {
-  // Common preset fallback IDs
   "perfect-ed_sheeran": "2Vv-BfVoq4g",
   "blinding_lights-the_weeknd": "4NRXx6U8ABQ",
   "as_it_was-harry_styles": "H5v3kku4y6Q",
   "flowers-miley_cyrus": "G7KNmW9a75Y",
   "starboy-the_weeknd": "34Na4j8AVgA",
-  "shape_of_you-ed_sheeran": "JGwWNGJdvx8",
+  "shape_of_you-ed_sheeran": "RP7A06un9FM",
   "envolver-anitta": "hFCJu1_0L_Q",
+  "la_danza-baco_exu_do_blues": "jSByoP2j8G4",
   "la_danza-baco_exu_do_gales": "jSByoP2j8G4",
   "sintomas_de_prazer-ludmilla": "O20eD4yZ_l8",
-  "lofi_hiphop-study_beats": "jfKfPfyJRdk", // live stream
+  "lofi_hiphop-study_beats": "jfKfPfyJRdk",
+  "save_your_tears-the_weeknd": "XXYlSF60K8c",
+  "don't_start_now-dua_lipa": "oygrmJFKYZY",
+  "dance_monkey-tones_and_i": "q0hyYWLu-BY",
+  "cheia_de_manias-raça_negra": "3s7S_VfubRE",
+  "evidências-chitãozinho_&_xororó": "ePjJZD_6Iec",
+  "anna_julia-los_hermanos": "K4w4M2f6v9M",
+  "tempos_modernos-lulu_santos": "X9V9l6s_j-c",
+  "piloto-flora_matos": "W9V-lO0U6YQ",
+  "bohemian_rhapsody-queen": "fJ9rUzIMcZQ",
+  "another_one_bites_the_dust-queen": "rY0WxgSXdEE",
+  "creep-radiohead": "XFkzRNyygfk",
+  "wonderwall-oasis": "6hzrDeceEKc",
+  "smells_like_teen_spirit-nirvana": "hTWKbfoikeg",
+  "hotel_california-eagles": "811QZGDYsxg"
 };
+
+// Curated local songs catalog to make search and playback 100% resilient
+const LOCAL_SONGS_CATALOG = [
+  { id: "syn_1", title: "Blinding Lights", artist: "The Weeknd", album: "After Hours", coverUrl: "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=400", youtubeId: "4NRXx6U8ABQ", duration: 200, type: "song" },
+  { id: "syn_2", title: "Starboy", artist: "The Weeknd", album: "Starboy", coverUrl: "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?w=400", youtubeId: "34Na4j8AVgA", duration: 230, type: "song" },
+  { id: "syn_5", title: "As It Was", artist: "Harry Styles", album: "Harry's House", coverUrl: "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=400", youtubeId: "H5v3kku4y6Q", duration: 167, type: "song" },
+  { id: "syn_6", title: "Flowers", artist: "Miley Cyrus", album: "Endless Summer Vacation", coverUrl: "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=400", youtubeId: "G7KNmW9a75Y", duration: 200, type: "song" },
+  { id: "syn_7", title: "Perfect", artist: "Ed Sheeran", album: "Divide", coverUrl: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400", youtubeId: "2Vv-BfVoq4g", duration: 263, type: "song" },
+  { id: "syn_8", title: "Shape of You", artist: "Ed Sheeran", album: "Divide", coverUrl: "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=400", youtubeId: "RP7A06un9FM", duration: 233, type: "song" },
+  { id: "syn_9", title: "Save Your Tears", artist: "The Weeknd", album: "After Hours", coverUrl: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=400", youtubeId: "XXYlSF60K8c", duration: 215, type: "song" },
+  { id: "syn_10", title: "Don't Start Now", artist: "Dua Lipa", album: "Future Nostalgia", coverUrl: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400", youtubeId: "oygrmJFKYZY", duration: 183, type: "song" },
+  
+  { id: "br_1", title: "Sintomas de Prazer", artist: "Ludmilla", album: "Vilã", coverUrl: "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=400", youtubeId: "O20eD4yZ_l8", duration: 142, type: "song" },
+  { id: "br_2", title: "Envolver", artist: "Anitta", album: "Versions of Me", coverUrl: "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=400", youtubeId: "hFCJu1_0L_Q", duration: 193, type: "song" },
+  { id: "br_3", title: "La Danza", artist: "Baco Exu do Blues", album: "QVVJFA", coverUrl: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=400", youtubeId: "jSByoP2j8G4", duration: 184, type: "song" },
+  { id: "br_4", title: "Piloto", artist: "Flora Matos", album: "Flora", coverUrl: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400", youtubeId: "W9V-lO0U6YQ", duration: 180, type: "song" },
+  { id: "br_5", title: "Evidências", artist: "Chitãozinho & Xororó", album: "Nossas Canções", coverUrl: "https://images.unsplash.com/photo-1482440308425-276ad0f28b19?w=400", youtubeId: "ePjJZD_6Iec", duration: 295, type: "song" },
+  { id: "br_6", title: "Cheia de Manias", artist: "Raça Negra", album: "O Som do Samba", coverUrl: "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=400", youtubeId: "3s7S_VfubRE", duration: 210, type: "song" },
+  { id: "br_7", title: "Anna Julia", artist: "Los Hermanos", album: "Los Hermanos", coverUrl: "https://images.unsplash.com/photo-1501386761578-eac5c94b800a?w=400", youtubeId: "K4w4M2f6v9M", duration: 212, type: "song" },
+  { id: "br_8", title: "Tempos Modernos", artist: "Lulu Santos", album: "Tempos Modernos", coverUrl: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400", youtubeId: "X9V9l6s_j-c", duration: 268, type: "song" },
+  
+  { id: "roc_1", title: "Another One Bites The Dust", artist: "Queen", album: "The Game", coverUrl: "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=400", youtubeId: "rY0WxgSXdEE", duration: 215, type: "song" },
+  { id: "roc_2", title: "Bohemian Rhapsody", artist: "Queen", album: "A Night at the Opera", coverUrl: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400", youtubeId: "fJ9rUzIMcZQ", duration: 354, type: "song" },
+  { id: "roc_3", title: "Smells Like Teen Spirit", artist: "Nirvana", album: "Nevermind", coverUrl: "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=400", youtubeId: "hTWKbfoikeg", duration: 301, type: "song" },
+  { id: "roc_4", title: "Hotel California", artist: "Eagles", album: "Hotel California", coverUrl: "https://images.unsplash.com/photo-1501386761578-eac5c94b800a?w=400", youtubeId: "811QZGDYsxg", duration: 390, type: "song" },
+  { id: "roc_5", title: "Creep", artist: "Radiohead", album: "Pablo Honey", coverUrl: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400", youtubeId: "XFkzRNyygfk", duration: 238, type: "song" },
+  { id: "roc_6", title: "Wonderwall", artist: "Oasis", album: "(What's the Story) Morning Glory?", coverUrl: "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=400", youtubeId: "6hzrDeceEKc", duration: 258, type: "song" },
+  
+  { id: "lofi_1", title: "Lofi Hip Hop Study Beats", artist: "Lofi Girl", album: "Focus Lofi", coverUrl: "https://images.unsplash.com/photo-1518495973542-4542c06a5843?w=400", youtubeId: "jfKfPfyJRdk", duration: 320, type: "song" },
+  { id: "lofi_2", title: "Snowman (Lofi Version)", artist: "Lofi Beats", album: "Winter Vibes", coverUrl: "https://images.unsplash.com/photo-1482440308425-276ad0f28b19?w=400", youtubeId: "9y6Z5_HiafM", duration: 175, type: "song" },
+  { id: "lofi_3", title: "Sunset Lover", artist: "Petit Biscuit", album: "Presence", coverUrl: "https://images.unsplash.com/photo-1501386761578-eac5c94b800a?w=400", youtubeId: "3ZleK7NfMec", duration: 237, type: "song" }
+];
 
 // API: Search music metadata via public Deezer endpoints
 app.get("/api/search", async (req, res) => {
-  const query = req.query.q as string || "";
+  const query = (req.query.q as string || "").trim();
   if (!query) {
     return res.json({ data: [] });
   }
 
+  // Pre-search: check matching items in our local pre-cached high-quality database
+  const cleanQ = query.toLowerCase();
+  const localMatches = LOCAL_SONGS_CATALOG.filter(t => 
+    t.title.toLowerCase().includes(cleanQ) || 
+    t.artist.toLowerCase().includes(cleanQ) || 
+    t.album.toLowerCase().includes(cleanQ)
+  );
+
   try {
     const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}`;
-    const response = await fetch(url);
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
     if (!response.ok) {
       throw new Error(`Deezer API returned ${response.status}`);
     }
@@ -70,11 +128,20 @@ app.get("/api/search", async (req, res) => {
       type: 'song'
     }));
 
-    res.json({ data: tracks });
+    // Combine local catalog matches to guarantee playability at the very top of search results
+    const combinedTracks = [...localMatches];
+    tracks.forEach((t: any) => {
+      if (!combinedTracks.some(ct => ct.title.toLowerCase() === t.title.toLowerCase() && ct.artist.toLowerCase() === t.artist.toLowerCase())) {
+        combinedTracks.push(t);
+      }
+    });
+
+    res.json({ data: combinedTracks });
   } catch (error: any) {
-    console.error("Search error:", error);
-    // Return curated fallback search list
-    res.json({ data: [], error: error.message });
+    console.error("Search error, falling back to local matches:", error);
+    // If the external network failed or is blocked, return the high-fidelity local catalog matches, or the full catalog if no specific match
+    const fallbackResults = localMatches.length > 0 ? localMatches : LOCAL_SONGS_CATALOG;
+    res.json({ data: fallbackResults, isFallback: true });
   }
 });
 
@@ -85,6 +152,15 @@ app.get("/api/yt-resolve", async (req, res) => {
   
   if (!title || !artist) {
     return res.status(400).json({ error: "Missing title or artist param" });
+  }
+
+  // Double check our catalog first to resolve instantly
+  const catalogMatch = LOCAL_SONGS_CATALOG.find(t => 
+    t.title.toLowerCase() === title.toLowerCase() && 
+    t.artist.toLowerCase() === artist.toLowerCase()
+  );
+  if (catalogMatch && catalogMatch.youtubeId) {
+    return res.json({ youtubeId: catalogMatch.youtubeId });
   }
 
   const cacheKey = `${title.toLowerCase()}-${artist.toLowerCase()}`.replace(/\s+/g, '_');
@@ -112,7 +188,6 @@ app.get("/api/yt-resolve", async (req, res) => {
         ytCache[cacheKey] = videoId;
         console.log(`Resolved youtubeId for "${title}" - "${artist}" and cached: ${videoId}`);
       } else {
-        // Safe search using text similarity as fallback
         console.warn(`No Youtube ID match, raw text returned: ${rawText}`);
       }
     } catch (err) {
