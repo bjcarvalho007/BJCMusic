@@ -147,29 +147,44 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, [volume]);
 
-  // Load the YouTube API dynamically on mounts
+  // Keep refs up-to-date to avoid stale closures in event listeners
+  const nextTrackRef = useRef<() => void>(() => {});
   useEffect(() => {
-    // Standard HTML Audio for radio streams
+    nextTrackRef.current = nextTrack;
+  }, [nextTrack]);
+
+  // Create HTML5 Audio exactly once on mount, and preserve its listeners across state changes
+  useEffect(() => {
     const audio = new Audio();
     audioRef.current = audio;
 
-    audio.addEventListener("play", () => setIsPlaying(true));
-    audio.addEventListener("pause", () => setIsPlaying(false));
-    audio.addEventListener("durationchange", () => {
-      setDuration(audio.duration || 0);
-    });
-    audio.addEventListener("timeupdate", () => {
-      // If we are simulating full length via looping the preview audio, ignore physical timeupdate events
-      if (audio.loop) return;
-      setProgress(audio.currentTime || 0);
-    });
-    audio.addEventListener("ended", () => {
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+    const onDurationChange = () => setDuration(audio.duration || 0);
+    const onEnded = () => {
+      // For radio streams or non-looping standard tracks
       if (!audio.loop) {
-        nextTrack();
+        nextTrackRef.current();
       }
-    });
+    };
 
-    // YouTube setup helper
+    audio.addEventListener("play", onPlay);
+    audio.addEventListener("pause", onPause);
+    audio.addEventListener("durationchange", onDurationChange);
+    audio.addEventListener("ended", onEnded);
+
+    return () => {
+      audio.removeEventListener("play", onPlay);
+      audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("durationchange", onDurationChange);
+      audio.removeEventListener("ended", onEnded);
+      audio.pause();
+      audio.src = "";
+    };
+  }, []);
+
+  // Load YouTube script on mount and keep players initialized once
+  useEffect(() => {
     if (!window.YT) {
       const tag = document.createElement("script");
       tag.src = "https://www.youtube.com/iframe_api";
@@ -177,7 +192,6 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
     }
 
-    // Set up global player callback with progressive retry to bind to React DOM target
     const initPlayer = () => {
       const target = document.getElementById("bjcmusic-yt-player-target");
       if (!target) {
@@ -229,12 +243,21 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       initPlayer();
     };
 
-    // If script is already compiled ready
     if (window.YT && window.YT.Player) {
       initPlayer();
     }
 
-    // Progress poller for Youtube and direct HTML5 audio playbacks
+    return () => {
+      if (ytPlayerRef.current && typeof ytPlayerRef.current.destroy === "function") {
+        try {
+          ytPlayerRef.current.destroy();
+        } catch {}
+      }
+    };
+  }, []);
+
+  // Progress poller for Youtube and direct HTML5 audio playbacks
+  useEffect(() => {
     const interval = setInterval(() => {
       if (currentTrack) {
         if (currentTrack.type === "song") {
@@ -257,7 +280,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               setProgress((prev) => {
                 const next = prev + 0.5;
                 if (next >= duration) {
-                  setTimeout(() => nextTrack(), 0);
+                  setTimeout(() => nextTrackRef.current(), 0);
                   return duration;
                 }
                 return next;
@@ -272,13 +295,6 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     return () => {
       clearInterval(interval);
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-      }
-      if (ytTimeoutRef.current) {
-        clearTimeout(ytTimeoutRef.current);
-      }
     };
   }, [currentTrack, isPlaying, duration]);
 
@@ -500,7 +516,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   // Play Next Song in Queue
-  const nextTrack = () => {
+  function nextTrack() {
     if (queue.length > 0) {
       const next = queue[0];
       const remaining = queue.slice(1);
@@ -512,7 +528,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         seekTo(0);
       }
     }
-  };
+  }
 
   // Play Previous (or restart time tracker)
   const prevTrack = () => {
