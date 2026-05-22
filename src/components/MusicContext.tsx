@@ -120,7 +120,9 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const isVideoLoadingRef = useRef<boolean>(false);
   const pendingTrackRef = useRef<{ track: Track; tracksContext?: Track[] } | null>(null);
   const activeEngineRef = useRef<"youtube" | "fallback">("youtube");
+  const activeTrackIdRef = useRef<string | null>(null);
   const ytTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const altYtTriedRef = useRef<Record<string, boolean>>({});
 
   // Loading initial data
   useEffect(() => {
@@ -152,6 +154,11 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     nextTrackRef.current = nextTrack;
   }, [nextTrack]);
+
+  const handleYoutubePlayerErrorRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  useEffect(() => {
+    handleYoutubePlayerErrorRef.current = handleYoutubePlayerError;
+  }, [currentTrack, volume, speed]);
 
   // Create HTML5 Audio exactly once on mount, and preserve its listeners across state changes
   useEffect(() => {
@@ -228,10 +235,33 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               }
             },
             onStateChange: (event: any) => {
-              // YouTube player is purely visual and silent.
-              // All core states (isPlaying, duration, progression, track completion) are handled masterfully by the standard HTML5 Audio element.
-              console.log("YouTube visual terminal state change:", event.data);
+              console.log("YouTube Player state change event:", event.data);
+              // State 0 (ENDED)
+              if (event.data === 0) {
+                if (activeEngineRef.current === "youtube") {
+                  console.log("YouTube track finished. Triggering next track.");
+                  nextTrackRef.current();
+                }
+              }
+              // State 1 (PLAYING)
+              if (event.data === 1) {
+                if (activeEngineRef.current === "youtube") {
+                  setIsPlaying(true);
+                }
+              }
+              // State 2 (PAUSED)
+              if (event.data === 2) {
+                if (activeEngineRef.current === "youtube") {
+                  setIsPlaying(false);
+                }
+              }
             },
+            onError: (event: any) => {
+              console.error("YouTube Player error encountered:", event.data);
+              if (activeEngineRef.current === "youtube") {
+                handleYoutubePlayerErrorRef.current();
+              }
+            }
           },
         });
       } catch (err) {
@@ -308,6 +338,67 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
+  // Handle YouTube player error by looking for an alternative search or triggering HTML5 audio preview as ultimate fallback
+  const handleYoutubePlayerError = async () => {
+    if (!currentTrack) return;
+    console.warn(`YouTube playback error on track: ${currentTrack.title} - ${currentTrack.artist}. Attempting dynamic recovery...`);
+    
+    // Check if we've already tried resolving an alternative track ID
+    if (!altYtTriedRef.current[currentTrack.id]) {
+      altYtTriedRef.current[currentTrack.id] = true;
+      try {
+        console.log("Requesting alternative YouTube video ID to bypass copyright or embed blocks...");
+        const res = await fetch(getApiUrl(`/api/yt-resolve?title=${encodeURIComponent(currentTrack.title)}&artist=${encodeURIComponent(currentTrack.artist)}&alternative=true`));
+        const data = await res.json();
+        
+        if (data.youtubeId && ytPlayerRef.current && typeof ytPlayerRef.current.loadVideoById === "function") {
+          currentTrack.youtubeId = data.youtubeId;
+          console.log(`Loaded alternative YouTube video ID successfully: ${data.youtubeId}`);
+          ytPlayerRef.current.loadVideoById(data.youtubeId);
+          ytPlayerRef.current.unMute();
+          ytPlayerRef.current.setVolume(volume * 100);
+          try {
+            ytPlayerRef.current.setPlaybackRate(speed);
+          } catch {}
+          ytPlayerRef.current.playVideo();
+          setIsPlaying(true);
+          return;
+        }
+      } catch (err) {
+        console.error("Dynamic YouTube lookup failed for fallback search:", err);
+      }
+    }
+
+    // Ultimate fallback: Use direct HTML5 Audio preview to ensure BJCmusic NEVER goes silent!
+    console.warn("YouTube video completely blocked or unavailable. Falling back seamlessly to direct preview stream.");
+    activeEngineRef.current = "fallback";
+    
+    let fallbackUrl = currentTrack.audioUrl;
+    if (fallbackUrl) {
+      if (fallbackUrl.startsWith("http://")) {
+        fallbackUrl = fallbackUrl.replace("http://", "https://");
+      }
+      if (audioRef.current) {
+        try {
+          audioRef.current.src = fallbackUrl;
+          audioRef.current.loop = true;
+          audioRef.current.volume = volume;
+          try {
+            audioRef.current.playbackRate = speed;
+          } catch {}
+          await audioRef.current.play();
+          setIsPlaying(true);
+        } catch (audioErr) {
+          console.error("HTML5 fallback sound also failed to bind:", audioErr);
+          nextTrack(); // skip to next track immediately to prevent getting stuck
+        }
+      }
+    } else {
+      // Direct skipping if no cover audio can be found
+      nextTrack();
+    }
+  };
+
   // Resolve YouTube ID and play safely with hybrid dual-player stream engine
   const playTrack = async (track: Track, tracksContext?: Track[]) => {
     if (isOfflineMode && !track.isOffline) {
@@ -315,13 +406,16 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return;
     }
 
+    activeTrackIdRef.current = track.id;
+    setProgress(0);
+
     // Clear any previous active YouTube timeout
     if (ytTimeoutRef.current) {
       clearTimeout(ytTimeoutRef.current);
       ytTimeoutRef.current = null;
     }
 
-    // Stop current playbacks immediately to avoid overlapping sound
+    // Stop all current playbacks immediately to avoid overlapping sound
     if (audioRef.current) {
       try {
         audioRef.current.pause();
@@ -366,8 +460,23 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     // Load recommendations dynamically
     fetchRecommendations(track);
 
+    // Preload next track's YouTube ID in background for ultra-smooth instant streaming of successive tracks
+    const nextInLine = tracksContext && tracksContext.length > 0 
+      ? tracksContext[tracksContext.findIndex((t) => t.id === track.id) + 1]
+      : queue[0];
+    if (nextInLine && !nextInLine.youtubeId && nextInLine.type !== "radio") {
+      fetch(getApiUrl(`/api/yt-resolve?title=${encodeURIComponent(nextInLine.title)}&artist=${encodeURIComponent(nextInLine.artist)}`))
+        .then(res => res.json())
+        .then(data => {
+          if (data.youtubeId) {
+            nextInLine.youtubeId = data.youtubeId;
+            console.log(`[Preload] Resolved youtubeID for upcoming track: "${nextInLine.title}"`);
+          }
+        }).catch(() => {});
+    }
+
     if (track.type === "radio") {
-      // Live Radio Stream (never looped)
+      // Live Radio Stream (never looped, always HTML5 Audio streaming)
       activeEngineRef.current = "fallback";
       if (audioRef.current && track.radioUrl) {
         let radioUrl = track.radioUrl;
@@ -385,66 +494,10 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       }
     } else {
-      // Song streaming! Standard and Offline tracks!
-      // Set our high-reliability HTML5 Audio element as the MASTER sound engine
-      activeEngineRef.current = "fallback";
+      // SONG STREAMING - YouTube Master audio engine!
+      activeEngineRef.current = "youtube";
 
-      // 1. If we already have a resolved audio url (from search result, downloads, etc.), use it immediately!
-      let resolvedAudioUrl = track.audioUrl;
-      if (resolvedAudioUrl && resolvedAudioUrl.startsWith("http://")) {
-        resolvedAudioUrl = resolvedAudioUrl.replace("http://", "https://");
-      }
-      const initialAudioUrl = resolvedAudioUrl || "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
-
-      // 2. Play synchronously right inside the user gesture event loop thread to bypass all browser autoplay blocks
-      if (audioRef.current) {
-        try {
-          audioRef.current.loop = true; // Use gapless native browser looping for the 30s preview sound
-          audioRef.current.src = initialAudioUrl;
-          audioRef.current.volume = volume;
-          try {
-            audioRef.current.playbackRate = speed;
-          } catch {}
-          
-          audioRef.current.play()
-            .then(() => setIsPlaying(true))
-            .catch((err) => {
-              console.warn("Autoplay block detected, waiting for user toggle:", err);
-              // Maintain state represents active play request
-              setIsPlaying(true);
-            });
-        } catch (err) {
-          console.error("Master sound activation error:", err);
-        }
-      }
-
-      // 3. Resolve the actual high-fidelity streaming preview MP3 URL in the background, if it wasn't pre-resolved
-      if (!resolvedAudioUrl) {
-        try {
-          const res = await fetch(getApiUrl(`/api/resolve-audio?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist)}`));
-          const data = await res.json();
-          if (data.audioUrl && audioRef.current) {
-            resolvedAudioUrl = data.audioUrl;
-            if (resolvedAudioUrl.startsWith("http://")) {
-              resolvedAudioUrl = resolvedAudioUrl.replace("http://", "https://");
-            }
-            track.audioUrl = resolvedAudioUrl;
-            
-            // Seamlessly swap-in the resolved source without stopping the current simulated playback progress!
-            if (activeEngineRef.current === "fallback" && currentTrack?.id === track.id) {
-              const currentPos = audioRef.current.currentTime;
-              audioRef.current.src = resolvedAudioUrl;
-              audioRef.current.currentTime = currentPos % 30; // Preview is bounded to 30s
-              audioRef.current.volume = volume;
-              audioRef.current.play().catch(() => {});
-            }
-          }
-        } catch (err) {
-          console.error("Background audio resolver failed:", err);
-        }
-      }
-
-      // 4. Resolve and spin up the YouTube Video Player *silently* to back the dashboard with gorgeous visual album clips!
+      // 1. Resolve and play the YouTube video unmuted to stream audio directly
       let ytId = track.youtubeId;
       if (!ytId) {
         try {
@@ -458,16 +511,45 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           console.error("Failed to fetch backing video:", err);
         }
       }
-      if (!ytId) ytId = "jfKfPfyJRdk"; // lofi girl default visual backing
+      if (!ytId) ytId = "jfKfPfyJRdk"; // default stable lofi beat if lookup fails
 
       if (ytPlayerRef.current && typeof ytPlayerRef.current.loadVideoById === "function") {
         try {
+          console.log(`Streaming official audio unmuted via YouTube IFrame: ${ytId}`);
           ytPlayerRef.current.loadVideoById(ytId);
-          // Strictly mute YouTube audio so it NEVER results in echoed or doubled overlapping sound paths
-          ytPlayerRef.current.mute();
+          ytPlayerRef.current.unMute();
+          ytPlayerRef.current.setVolume(volume * 100);
+          try {
+            ytPlayerRef.current.setPlaybackRate(speed);
+          } catch {}
           ytPlayerRef.current.playVideo();
+          setIsPlaying(true);
         } catch (err) {
-          console.error("Failed to load visual backing:", err);
+          console.error("Failed to play track through YouTube IFrame:", err);
+          handleYoutubePlayerError(); // fall back if loading crashes
+        }
+      } else {
+        // If YouTube player script is not ready or is sandboxed, fall back seamlessly to HTML5 sound preview
+        console.warn("YouTube script is not fully initialized. Falling back synchronously to direct HTML5 sound.");
+        activeEngineRef.current = "fallback";
+        let fallbackUrl = track.audioUrl;
+        if (fallbackUrl && fallbackUrl.startsWith("http://")) {
+          fallbackUrl = fallbackUrl.replace("http://", "https://");
+        }
+        const initialAudioUrl = fallbackUrl || "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+        if (audioRef.current) {
+          try {
+            audioRef.current.src = initialAudioUrl;
+            audioRef.current.loop = true;
+            audioRef.current.volume = volume;
+            try {
+              audioRef.current.playbackRate = speed;
+            } catch {}
+            await audioRef.current.play();
+            setIsPlaying(true);
+          } catch (e) {
+            console.error("HTML5 synchronous sound initiation failed:", e);
+          }
         }
       }
     }
@@ -478,39 +560,39 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!currentTrack) return;
 
     const nextPlayState = !isPlaying;
-    
-    // Always change state immediately to keep the visual UI extremely responsive
     setIsPlaying(nextPlayState);
 
-    // 1. Control HTML5 audio engine
-    if (audioRef.current) {
-      try {
-        if (nextPlayState) {
-          audioRef.current.play().catch((err) => {
-            console.warn("HTML5 Playback blocked on toggle:", err);
-          });
-        } else {
-          audioRef.current.pause();
+    if (activeEngineRef.current === "youtube") {
+      if (ytPlayerRef.current) {
+        try {
+          if (nextPlayState) {
+            ytPlayerRef.current.unMute();
+            ytPlayerRef.current.setVolume(volume * 100);
+            if (typeof ytPlayerRef.current.playVideo === "function") {
+              ytPlayerRef.current.playVideo();
+            }
+          } else {
+            if (typeof ytPlayerRef.current.pauseVideo === "function") {
+              ytPlayerRef.current.pauseVideo();
+            }
+          }
+        } catch (err) {
+          console.error("YouTube Player toggle error:", err);
         }
-      } catch (err) {
-        console.error("HTML5 player toggle error:", err);
       }
-    }
-
-    // 2. Control YouTube engine
-    if (ytPlayerRef.current) {
-      try {
-        if (nextPlayState) {
-          if (typeof ytPlayerRef.current.playVideo === "function") {
-            ytPlayerRef.current.playVideo();
+    } else {
+      if (audioRef.current) {
+        try {
+          if (nextPlayState) {
+            audioRef.current.play().catch((err) => {
+              console.warn("HTML5 Playback blocked on toggle:", err);
+            });
+          } else {
+            audioRef.current.pause();
           }
-        } else {
-          if (typeof ytPlayerRef.current.pauseVideo === "function") {
-            ytPlayerRef.current.pauseVideo();
-          }
+        } catch (err) {
+          console.error("HTML5 player toggle error:", err);
         }
-      } catch (err) {
-        console.error("YouTube Player toggle error:", err);
       }
     }
   };
@@ -522,6 +604,11 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const remaining = queue.slice(1);
       setQueue(remaining);
       playTrack(next);
+    } else if (smartRecs.length > 0) {
+      // Autoplay inteligente / Radio infinita: select a recommended track dynamically
+      const randomRec = smartRecs[Math.floor(Math.random() * smartRecs.length)];
+      console.log("Queue ended. Autoplay selecting recommended track next:", randomRec.title);
+      playTrack(randomRec);
     } else {
       // Loop or restart currently playing track
       if (currentTrack) {

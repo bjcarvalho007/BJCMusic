@@ -157,9 +157,9 @@ app.get("/api/search", async (req, res) => {
       }
     });
 
-    // If matches are completely empty, guarantee rich outcomes by falling back to our high-fidelity local catalog
+    // If matches are completely empty, trigger advanced Gemini dynamic search fallback rather than generic local catalogue fallback
     if (combinedTracks.length === 0) {
-      return res.json({ data: LOCAL_SONGS_CATALOG, isFallback: true });
+      throw new Error("Empty results from Deezer API and local matches cache.");
     }
 
     res.json({ data: combinedTracks });
@@ -282,23 +282,31 @@ app.get("/api/resolve-audio", async (req, res) => {
 app.get("/api/yt-resolve", async (req, res) => {
   const title = req.query.title as string || "";
   const artist = req.query.artist as string || "";
+  const isAlternative = req.query.alternative === "true";
   
   if (!title || !artist) {
     return res.status(400).json({ error: "Missing title or artist param" });
   }
 
-  // Double check our catalog first to resolve instantly
-  const catalogMatch = LOCAL_SONGS_CATALOG.find(t => 
-    t.title.toLowerCase() === title.toLowerCase() && 
-    t.artist.toLowerCase() === artist.toLowerCase()
-  );
-  if (catalogMatch && catalogMatch.youtubeId) {
-    return res.json({ youtubeId: catalogMatch.youtubeId });
+  // Double check our catalog first to resolve instantly (only if not searching for an alternative)
+  if (!isAlternative) {
+    const catalogMatch = LOCAL_SONGS_CATALOG.find(t => 
+      t.title.toLowerCase() === title.toLowerCase() && 
+      t.artist.toLowerCase() === artist.toLowerCase()
+    );
+    if (catalogMatch && catalogMatch.youtubeId) {
+      return res.json({ youtubeId: catalogMatch.youtubeId });
+    }
+
+    const cacheKey = `${title.toLowerCase()}-${artist.toLowerCase()}`.replace(/\s+/g, '_');
+    if (ytCache[cacheKey]) {
+      return res.json({ youtubeId: ytCache[cacheKey] });
+    }
   }
 
-  const cacheKey = `${title.toLowerCase()}-${artist.toLowerCase()}`.replace(/\s+/g, '_');
-  if (ytCache[cacheKey]) {
-    return res.json({ youtubeId: ytCache[cacheKey] });
+  const cacheKeyAlt = `${title.toLowerCase()}-${artist.toLowerCase()}_alt`.replace(/\s+/g, '_');
+  if (isAlternative && ytCache[cacheKeyAlt]) {
+    return res.json({ youtubeId: ytCache[cacheKeyAlt] });
   }
 
   // Fallback pattern if Gemini is not loaded
@@ -306,9 +314,13 @@ app.get("/api/yt-resolve", async (req, res) => {
 
   if (ai) {
     try {
+      const prompt = isAlternative 
+        ? `Search for a completely DIFFERENT and alternate high-quality or official audio/lyrics upload of the song "${title}" by "${artist}" suitable for public embedding. Ground your answer in Google Search. Output ONLY the exact 11-character YouTube video ID. No formatting, no extra words.`
+        : `Search for the official YouTube music video of "${title}" by "${artist}". Ground your answer in Google Search. Output ONLY the exact 11-character YouTube video ID (like dQw4w9WgXcQ or H5v3kku4y6Q). No formatting, no extra words.`;
+
       const response = await ai.models.generateContent({
         model: "gemini-3.5-flash",
-        contents: `Search for the official YouTube music video of "${title}" by "${artist}". Ground your answer in Google Search. Output ONLY the exact 11-character YouTube video ID (like dQw4w9WgXcQ or H5v3kku4y6Q). No formatting, no extra words.`,
+        contents: prompt,
         config: {
           tools: [{ googleSearch: {} }],
         },
@@ -318,24 +330,38 @@ app.get("/api/yt-resolve", async (req, res) => {
       const matches = rawText.match(/([a-zA-Z0-9_-]{11})/);
       if (matches && matches[1]) {
         videoId = matches[1];
-        ytCache[cacheKey] = videoId;
-        console.log(`Resolved youtubeId for "${title}" - "${artist}" and cached: ${videoId}`);
+        if (isAlternative) {
+          ytCache[cacheKeyAlt] = videoId;
+        } else {
+          const cacheKey = `${title.toLowerCase()}-${artist.toLowerCase()}`.replace(/\s+/g, '_');
+          ytCache[cacheKey] = videoId;
+        }
+        console.log(`Resolved youtubeId for "${title}" - "${artist}" (alternate=${isAlternative}) and cached: ${videoId}`);
       } else {
         throw new Error(`Invalid text: ${rawText}`);
       }
     } catch (err) {
       console.warn("Gemini with search grounding failed or restricted, trying direct prompt query fallback...", err);
       try {
+        const prompt = isAlternative
+          ? `Provide an alternate 11-character YouTube video ID (like lyric or audio version) for "${title}" by "${artist}". Output ONLY the 11-character ID. No formatting, no words.`
+          : `What is the official 11-character YouTube video ID for the song "${title}" by "${artist}"? Output ONLY the 11-character ID (like dQw4w9WgXcQ or H5v3kku4y6Q). No formatting, no markdown, no other words.`;
+
         const fallbackResponse = await ai.models.generateContent({
           model: "gemini-3.5-flash",
-          contents: `What is the official 11-character YouTube video ID for the song "${title}" by "${artist}"? Output ONLY the 11-character ID (like dQw4w9WgXcQ or H5v3kku4y6Q). No formatting, no markdown, no other words.`,
+          contents: prompt,
         });
         const rawText = fallbackResponse.text || "";
         const matches = rawText.match(/([a-zA-Z0-9_-]{11})/);
         if (matches && matches[1]) {
           videoId = matches[1];
-          ytCache[cacheKey] = videoId;
-          console.log(`Resolved (fallback direct Gemini) youtubeId for "${title}" - "${artist}": ${videoId}`);
+          if (isAlternative) {
+            ytCache[cacheKeyAlt] = videoId;
+          } else {
+            const cacheKey = `${title.toLowerCase()}-${artist.toLowerCase()}`.replace(/\s+/g, '_');
+            ytCache[cacheKey] = videoId;
+          }
+          console.log(`Resolved (fallback direct Gemini) youtubeId for "${title}" - "${artist}" (alternate=${isAlternative}): ${videoId}`);
         }
       } catch (fallbackErr) {
         console.error("Direct fallback also failed. Using steady lo-fi default loop.", fallbackErr);
