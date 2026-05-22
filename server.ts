@@ -68,6 +68,10 @@ const ytCache: Record<string, string> = {
   "hotel_california-eagles": "811QZGDYsxg"
 };
 
+// In-Memory caches for smart recommendations and lyrics (prevents exceeding Gemini free-tier daily quotas)
+const recCache: Record<string, any> = {};
+const lyricsCache: Record<string, string> = {};
+
 // Curated local songs catalog to make search and playback 100% resilient
 const LOCAL_SONGS_CATALOG = [
   { id: "syn_1", title: "Blinding Lights", artist: "The Weeknd", album: "After Hours", coverUrl: "https://images.unsplash.com/photo-1508700115892-45ecd05ae2ad?w=400", youtubeId: "4NRXx6U8ABQ", duration: 200, type: "song" },
@@ -160,10 +164,79 @@ app.get("/api/search", async (req, res) => {
 
     res.json({ data: combinedTracks });
   } catch (error: any) {
-    console.error("Search error, falling back to local matches:", error);
-    // If the external network failed, is blocked, or is throttled, return the high-fidelity local catalog matches, or the full catalog
+    console.error("Search error, trying advanced Gemini dynamic search fallback:", error);
+    
+    if (ai) {
+      try {
+        console.log(`Deezer search failed. Querying Gemini to generate matching songs for query "${query}"...`);
+        const response = await ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: `Suggested real, high-quality songs matching the query "${query}". Offer exactly 6 real, famous song results.
+Provide the response inside a JSON array matching this schema:
+[
+  { "title": "Song Title", "artist": "Artist Name", "album": "Album Name", "duration": 220 }
+]`,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  artist: { type: Type.STRING },
+                  album: { type: Type.STRING },
+                  duration: { type: Type.INTEGER }
+                },
+                required: ["title", "artist", "album", "duration"]
+              }
+            }
+          }
+        });
+
+        const text = response.text || "[]";
+        const aiSongs = JSON.parse(text);
+
+        if (aiSongs && aiSongs.length > 0) {
+          const transformed = aiSongs.map((s: any, idx: number) => {
+            const covers = [
+              "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?w=400",
+              "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400",
+              "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=400",
+              "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=400",
+              "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=400",
+              "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=400"
+            ];
+            return {
+              id: `ai_dz_${Math.random().toString(36).substr(2, 9)}_${idx}`,
+              title: s.title,
+              artist: s.artist,
+              album: s.album,
+              coverUrl: covers[idx % covers.length],
+              youtubeId: "", // resolved dynamically in real time
+              duration: s.duration,
+              type: "song",
+              audioUrl: "" // Will resolve fallback or play unmuted Youtube
+            };
+          });
+
+          const combined = [...localMatches];
+          transformed.forEach((t: any) => {
+            if (!combined.some(ct => ct.title.toLowerCase() === t.title.toLowerCase() && ct.artist.toLowerCase() === t.artist.toLowerCase())) {
+              combined.push(t);
+            }
+          });
+
+          return res.json({ data: combined, isFallback: false, source: "gemini" });
+        }
+      } catch (aiErr) {
+        console.error("Gemini search fallback failed too:", aiErr);
+      }
+    }
+
+    // Ultimate fallback if both fails, ensuring user always gets results
     const fallbackResults = localMatches.length > 0 ? localMatches : LOCAL_SONGS_CATALOG;
-    res.json({ data: fallbackResults, isFallback: true });
+    res.json({ data: fallbackResults, isFallback: true, source: "local" });
   }
 });
 
@@ -312,8 +385,25 @@ app.post("/api/recommendations", async (req, res) => {
     return res.status(400).json({ error: "Title and artist are required" });
   }
 
+  const cacheKey = `${title.toLowerCase()}-${artist.toLowerCase()}`.replace(/\s+/g, '_');
+  
+  // 1. Check in-memory cache first to avoid API spam
+  if (recCache[cacheKey]) {
+    console.log(`[Cache Hit] Serving cached recommendations for "${title}" - "${artist}"`);
+    return res.json({ data: recCache[cacheKey] });
+  }
+
+  // 2. Dynamic, high-quality local catalog recommendations (will be used as fallback)
+  const getLocalFallbackRecommendations = () => {
+    return LOCAL_SONGS_CATALOG
+      .filter(t => t.title.toLowerCase() !== title.toLowerCase())
+      .sort(() => 0.5 - Math.random())
+      .slice(0, 5);
+  };
+
   if (ai) {
     try {
+      console.log(`[AI Request] Querying Gemini for similar songs to "${title}" - "${artist}"...`);
       const prompt = `Based on the song "${title}" by "${artist}", and recent listens: [${(recentTracks || []).map((t: any) => t.title).join(", ")}], suggest 5 similar tracks that would form a perfect seamless blend.
 Respond ONLY with a JSON array inside a standard JSON format exactly following this schema:
 [
@@ -363,7 +453,7 @@ Respond ONLY with a JSON array inside a standard JSON format exactly following t
               };
             }
           } catch {}
-          // Fallback track if Deezer query fails
+          // Fallback track from query if Deezer fails to lookup
           return {
             id: `rec_${Math.random().toString(36).substr(2, 9)}`,
             title: rec.title,
@@ -377,47 +467,18 @@ Respond ONLY with a JSON array inside a standard JSON format exactly following t
         })
       );
 
+      // Cache result and return
+      recCache[cacheKey] = enrichedTracks;
       return res.json({ data: enrichedTracks });
     } catch (e: any) {
-      console.error("Gemini recommendation error:", e);
+      console.warn(`[Safe Guard] Gemini recommendations unavailable or rate-limited (${e.message || e}). Serving high-fidelity local catalog matches.`);
     }
   }
 
-  // Pre-configured rich fallbacks if AI is unavailable
-  res.json({
-    data: [
-      {
-        id: "dz_1109731",
-        title: "Creep",
-        artist: "Radiohead",
-        album: "Pablo Honey",
-        coverUrl: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400",
-        youtubeId: "XFkzRNyygfk",
-        duration: 238,
-        type: "song"
-      },
-      {
-        id: "dz_1109732",
-        title: "Wonderwall",
-        artist: "Oasis",
-        album: "(What's the Story) Morning Glory?",
-        coverUrl: "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=400",
-        youtubeId: "6hzrDeceEKc",
-        duration: 258,
-        type: "song"
-      },
-      {
-        id: "dz_1109733",
-        title: "Smells Like Teen Spirit",
-        artist: "Nirvana",
-        album: "Nevermind",
-        coverUrl: "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=400",
-        youtubeId: "hTWKbfoikeg",
-        duration: 301,
-        type: "song"
-      }
-    ]
-  });
+  // 3. Fallback path if AI is unavailable, offline, or rate-limited (caching it too to prevent fast repeated requests)
+  const fallbackRecs = getLocalFallbackRecommendations();
+  recCache[cacheKey] = fallbackRecs;
+  res.json({ data: fallbackRecs, source: "offline-fallback" });
 });
 
 // API: Get Scrolling Synced Lyrics for an outstanding player experience!
@@ -427,25 +488,17 @@ app.post("/api/lyrics", async (req, res) => {
     return res.status(400).json({ error: "Missing title or artist" });
   }
 
-  if (ai) {
-    try {
-      const prompt = `Write beautifully structured lyrics for the song "${title}" by "${artist}". Add sync cues at the start of each paragraph, for example [00:15] or [01:45], marking major transitions like [Verse 1], [Chorus], etc.
-Respond directly with the lyrics text. If you do not know the exact lyrics, generate a beautiful, accurate song poetry structure that resembles the lyrics perfectly. Feel free to translate or structure clearly.`;
+  const cacheKey = `${title.toLowerCase()}-${artist.toLowerCase()}`.replace(/\s+/g, '_');
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-      });
-
-      return res.json({ lyrics: response.text || "Letras não disponíveis." });
-    } catch (e: any) {
-      console.error("Gemini lyrics failure:", e);
-    }
+  // 1. Check in-memory cache first to avoid API spam
+  if (lyricsCache[cacheKey]) {
+    console.log(`[Cache Hit] Serving cached lyrics for "${title}" - "${artist}"`);
+    return res.json({ lyrics: lyricsCache[cacheKey] });
   }
 
-  // Beautiful curated fallback lyrics
-  res.json({
-    lyrics: `[00:00] Play with BJCmusic Audio Stream Engine
+  // 2. Custom beautifully structured fallback lyrics builder matching the song
+  const getFallbackLyrics = () => {
+    return `[00:00] Play with BJCmusic Audio Stream Engine
 [00:04] Enjoy high quality playback
 [00:08] [Letra de amostra para ${title} - ${artist}]
 [00:12] Hummm... Sentindo a batida do som...
@@ -459,8 +512,32 @@ Respond directly with the lyrics text. If you do not know the exact lyrics, gene
 [01:00] Nunca estou sozinho com essa melodia
 [01:06] Nas ondas do streaming que cruzam o espaço
 [01:12] Toda sintonia se faz no compasso!
-[01:20] Tocando agora: ${title}!`
-  });
+[01:20] Tocando agora: ${title} por ${artist}!`;
+  };
+
+  if (ai) {
+    try {
+      console.log(`[AI Request] Querying Gemini for lyrics of "${title}" - "${artist}"...`);
+      const prompt = `Write beautifully structured lyrics for the song "${title}" by "${artist}". Add sync cues at the start of each paragraph, for example [00:15] or [01:45], marking major transitions like [Verse 1], [Chorus], etc.
+Respond directly with the lyrics text. If you do not know the exact lyrics, generate a beautiful, accurate song poetry structure that resembles the lyrics perfectly. Feel free to translate or structure clearly.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: prompt,
+      });
+
+      const parsedLyrics = response.text || getFallbackLyrics();
+      lyricsCache[cacheKey] = parsedLyrics;
+      return res.json({ lyrics: parsedLyrics });
+    } catch (e: any) {
+      console.warn(`[Safe Guard] Gemini lyrics unavailable or rate-limited (${e.message || e}). Serving beautifully crafted fallback lyrics.`);
+    }
+  }
+
+  // 3. Keep cached fallback structured lyrics
+  const fallbackLyrics = getFallbackLyrics();
+  lyricsCache[cacheKey] = fallbackLyrics;
+  res.json({ lyrics: fallbackLyrics });
 });
 
 // Set up dynamic preload of local catalog sound previews via Deezer

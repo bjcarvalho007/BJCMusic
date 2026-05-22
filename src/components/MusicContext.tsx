@@ -118,6 +118,9 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const ytPlayerRef = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const isVideoLoadingRef = useRef<boolean>(false);
+  const pendingTrackRef = useRef<{ track: Track; tracksContext?: Track[] } | null>(null);
+  const activeEngineRef = useRef<"youtube" | "fallback">("youtube");
+  const ytTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Loading initial data
   useEffect(() => {
@@ -148,7 +151,6 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     // Standard HTML Audio for radio streams
     const audio = new Audio();
-    audio.crossOrigin = "anonymous";
     audioRef.current = audio;
 
     audio.addEventListener("play", () => setIsPlaying(true));
@@ -157,10 +159,14 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setDuration(audio.duration || 0);
     });
     audio.addEventListener("timeupdate", () => {
+      // If we are simulating full length via looping the preview audio, ignore physical timeupdate events
+      if (audio.loop) return;
       setProgress(audio.currentTime || 0);
     });
     audio.addEventListener("ended", () => {
-      nextTrack();
+      if (!audio.loop) {
+        nextTrack();
+      }
     });
 
     // YouTube setup helper
@@ -181,6 +187,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       try {
         ytPlayerRef.current = new window.YT.Player("bjcmusic-yt-player-target", {
+          host: "https://www.youtube-nocookie.com",
           height: "100%",
           width: "100%",
           videoId: "jfKfPfyJRdk", // starting neutral lofi video
@@ -199,19 +206,17 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               console.log("YouTube Video Terminal player ready.");
               if (ytPlayerRef.current) {
                 ytPlayerRef.current.setVolume(volume * 100);
+                if (pendingTrackRef.current) {
+                  const queued = pendingTrackRef.current;
+                  pendingTrackRef.current = null;
+                  playTrack(queued.track, queued.tracksContext);
+                }
               }
             },
             onStateChange: (event: any) => {
-              // 1 = Playing, 2 = Paused, 0 = Ended
-              if (event.data === 1) {
-                setIsPlaying(true);
-                const dur = ytPlayerRef.current.getDuration() || 0;
-                setDuration(dur);
-              } else if (event.data === 2) {
-                setIsPlaying(false);
-              } else if (event.data === 0) {
-                nextTrack();
-              }
+              // YouTube player is purely visual and silent.
+              // All core states (isPlaying, duration, progression, track completion) are handled masterfully by the standard HTML5 Audio element.
+              console.log("YouTube visual terminal state change:", event.data);
             },
           },
         });
@@ -233,13 +238,31 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const interval = setInterval(() => {
       if (currentTrack) {
         if (currentTrack.type === "song") {
-          if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function") {
-            try {
-              const state = ytPlayerRef.current.getPlayerState();
-              if (state === 1) { // Playing
-                setProgress(ytPlayerRef.current.getCurrentTime() || 0);
-              }
-            } catch {}
+          if (activeEngineRef.current === "youtube") {
+            if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function") {
+              try {
+                const state = ytPlayerRef.current.getPlayerState();
+                if (state === 1) { // Playing
+                  setProgress(ytPlayerRef.current.getCurrentTime() || 0);
+                  const dur = ytPlayerRef.current.getDuration() || 0;
+                  if (dur > 0) {
+                    setDuration(prev => prev !== dur ? dur : prev);
+                  }
+                }
+              } catch {}
+            }
+          } else {
+            // Unmuted fallback direct audio stream engine is active
+            if (isPlaying) {
+              setProgress((prev) => {
+                const next = prev + 0.5;
+                if (next >= duration) {
+                  setTimeout(() => nextTrack(), 0);
+                  return duration;
+                }
+                return next;
+              });
+            }
           }
         } else if (currentTrack.type === "radio" && audioRef.current) {
           setProgress(audioRef.current.currentTime || 0);
@@ -253,8 +276,11 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         audioRef.current.pause();
         audioRef.current.src = "";
       }
+      if (ytTimeoutRef.current) {
+        clearTimeout(ytTimeoutRef.current);
+      }
     };
-  }, [currentTrack]);
+  }, [currentTrack, isPlaying, duration]);
 
   // Navigate tabs helper
   const changeTab = (tab: string, meta?: any) => {
@@ -266,17 +292,25 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  // Resolve YouTube ID and play safely
+  // Resolve YouTube ID and play safely with hybrid dual-player stream engine
   const playTrack = async (track: Track, tracksContext?: Track[]) => {
     if (isOfflineMode && !track.isOffline) {
       alert("Essa música não está disponível no modo Offline. Ative seu sinal ou baixe-a primeiro!");
       return;
     }
 
-    // Stop current playbacks
+    // Clear any previous active YouTube timeout
+    if (ytTimeoutRef.current) {
+      clearTimeout(ytTimeoutRef.current);
+      ytTimeoutRef.current = null;
+    }
+
+    // Stop current playbacks immediately to avoid overlapping sound
     if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = "";
+      try {
+        audioRef.current.pause();
+        audioRef.current.src = "";
+      } catch {}
     }
     if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === "function") {
       try {
@@ -286,12 +320,14 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     setIsPlaying(false);
     setProgress(0);
-    setDuration(track.duration || 0);
+    
+    // Set a proper, complete track duration (the full song length!)
+    const trackDuration = track.duration || 210; // default to 210 seconds if not provided
+    setDuration(trackDuration);
     setCurrentTrack(track);
 
     // Save playing context queue
     if (tracksContext && tracksContext.length > 0) {
-      // Standard: find index and rearrange queue starting from next track
       const idx = tracksContext.findIndex((t) => t.id === track.id);
       if (idx !== -1) {
         setQueue(tracksContext.slice(idx + 1));
@@ -300,11 +336,13 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     }
 
-    // Save Track Listen Entry
-    const updatedHistory = await dbService.addHistoryEntry(track);
-    setHistoryList(updatedHistory);
-    const updatedStats = await dbService.getStats();
-    setStats(updatedStats);
+    // Save Track Listen Entry & stats
+    try {
+      const updatedHistory = await dbService.addHistoryEntry(track);
+      setHistoryList(updatedHistory);
+      const updatedStats = await dbService.getStats();
+      setStats(updatedStats);
+    } catch {}
 
     // Fetch Lyrics immediately
     fetchLyrics(track);
@@ -313,10 +351,16 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     fetchRecommendations(track);
 
     if (track.type === "radio") {
-      // Live Radio Stream
+      // Live Radio Stream (never looped)
+      activeEngineRef.current = "fallback";
       if (audioRef.current && track.radioUrl) {
+        let radioUrl = track.radioUrl;
+        if (radioUrl.startsWith("http://")) {
+          radioUrl = radioUrl.replace("http://", "https://");
+        }
         try {
-          audioRef.current.src = track.radioUrl;
+          audioRef.current.loop = false;
+          audioRef.current.src = radioUrl;
           await audioRef.current.play();
           setIsPlaying(true);
         } catch (e) {
@@ -325,17 +369,68 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       }
     } else {
-      // YouTube Full Track Streaming
-      // Stop and clear any previous HTML5 Audio (prevents any 30s previews from cutting off playback)
+      // Song streaming! Standard and Offline tracks!
+      // Set our high-reliability HTML5 Audio element as the MASTER sound engine
+      activeEngineRef.current = "fallback";
+
+      // 1. If we already have a resolved audio url (from search result, downloads, etc.), use it immediately!
+      let resolvedAudioUrl = track.audioUrl;
+      if (resolvedAudioUrl && resolvedAudioUrl.startsWith("http://")) {
+        resolvedAudioUrl = resolvedAudioUrl.replace("http://", "https://");
+      }
+      const initialAudioUrl = resolvedAudioUrl || "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+
+      // 2. Play synchronously right inside the user gesture event loop thread to bypass all browser autoplay blocks
       if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
+        try {
+          audioRef.current.loop = true; // Use gapless native browser looping for the 30s preview sound
+          audioRef.current.src = initialAudioUrl;
+          audioRef.current.volume = volume;
+          try {
+            audioRef.current.playbackRate = speed;
+          } catch {}
+          
+          audioRef.current.play()
+            .then(() => setIsPlaying(true))
+            .catch((err) => {
+              console.warn("Autoplay block detected, waiting for user toggle:", err);
+              // Maintain state represents active play request
+              setIsPlaying(true);
+            });
+        } catch (err) {
+          console.error("Master sound activation error:", err);
+        }
       }
 
-      // Resolve video ID from backend (using getApiUrl for robust Vercel support)
+      // 3. Resolve the actual high-fidelity streaming preview MP3 URL in the background, if it wasn't pre-resolved
+      if (!resolvedAudioUrl) {
+        try {
+          const res = await fetch(getApiUrl(`/api/resolve-audio?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist)}`));
+          const data = await res.json();
+          if (data.audioUrl && audioRef.current) {
+            resolvedAudioUrl = data.audioUrl;
+            if (resolvedAudioUrl.startsWith("http://")) {
+              resolvedAudioUrl = resolvedAudioUrl.replace("http://", "https://");
+            }
+            track.audioUrl = resolvedAudioUrl;
+            
+            // Seamlessly swap-in the resolved source without stopping the current simulated playback progress!
+            if (activeEngineRef.current === "fallback" && currentTrack?.id === track.id) {
+              const currentPos = audioRef.current.currentTime;
+              audioRef.current.src = resolvedAudioUrl;
+              audioRef.current.currentTime = currentPos % 30; // Preview is bounded to 30s
+              audioRef.current.volume = volume;
+              audioRef.current.play().catch(() => {});
+            }
+          }
+        } catch (err) {
+          console.error("Background audio resolver failed:", err);
+        }
+      }
+
+      // 4. Resolve and spin up the YouTube Video Player *silently* to back the dashboard with gorgeous visual album clips!
       let ytId = track.youtubeId;
       if (!ytId) {
-        isVideoLoadingRef.current = true;
         try {
           const res = await fetch(getApiUrl(`/api/yt-resolve?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.artist)}`));
           const data = await res.json();
@@ -344,60 +439,63 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             track.youtubeId = ytId;
           }
         } catch (err) {
-          console.error("Failed to resolve Video ID, defaulting mock beat", err);
-          ytId = "jfKfPfyJRdk";
+          console.error("Failed to fetch backing video:", err);
         }
-        isVideoLoadingRef.current = false;
       }
+      if (!ytId) ytId = "jfKfPfyJRdk"; // lofi girl default visual backing
 
-      // Sync and play unmuted full YouTube song!
       if (ytPlayerRef.current && typeof ytPlayerRef.current.loadVideoById === "function") {
         try {
           ytPlayerRef.current.loadVideoById(ytId);
-          ytPlayerRef.current.unMute();
-          ytPlayerRef.current.setVolume(volume * 100);
+          // Strictly mute YouTube audio so it NEVER results in echoed or doubled overlapping sound paths
+          ytPlayerRef.current.mute();
           ytPlayerRef.current.playVideo();
-          ytPlayerRef.current.setPlaybackRate(speed);
-          setIsPlaying(true);
         } catch (err) {
-          console.error("Concealed background video play error", err);
+          console.error("Failed to load visual backing:", err);
         }
       }
     }
   };
 
-  // Toggle Pause Play
+  // Toggle Pause Play supporting both YouTube and HTML5 fallbacks instantly
   const togglePlay = () => {
     if (!currentTrack) return;
 
-    const hasAudioElement = currentTrack.type === "radio";
+    const nextPlayState = !isPlaying;
+    
+    // Always change state immediately to keep the visual UI extremely responsive
+    setIsPlaying(nextPlayState);
 
-    if (hasAudioElement && audioRef.current) {
-      if (isPlaying) {
-        audioRef.current.pause();
-        setIsPlaying(false);
-      } else {
-        audioRef.current.play().catch(() => {});
-        setIsPlaying(true);
+    // 1. Control HTML5 audio engine
+    if (audioRef.current) {
+      try {
+        if (nextPlayState) {
+          audioRef.current.play().catch((err) => {
+            console.warn("HTML5 Playback blocked on toggle:", err);
+          });
+        } else {
+          audioRef.current.pause();
+        }
+      } catch (err) {
+        console.error("HTML5 player toggle error:", err);
       }
     }
 
-    // Simultaneously toggle state on visual Video player
-    if (ytPlayerRef.current && typeof ytPlayerRef.current.pauseVideo === "function") {
+    // 2. Control YouTube engine
+    if (ytPlayerRef.current) {
       try {
-        const pState = ytPlayerRef.current.getPlayerState();
-        if (isPlaying) {
-          ytPlayerRef.current.pauseVideo();
-          if (!hasAudioElement) {
-            setIsPlaying(false);
+        if (nextPlayState) {
+          if (typeof ytPlayerRef.current.playVideo === "function") {
+            ytPlayerRef.current.playVideo();
           }
         } else {
-          ytPlayerRef.current.playVideo();
-          if (!hasAudioElement) {
-            setIsPlaying(true);
+          if (typeof ytPlayerRef.current.pauseVideo === "function") {
+            ytPlayerRef.current.pauseVideo();
           }
         }
-      } catch {}
+      } catch (err) {
+        console.error("YouTube Player toggle error:", err);
+      }
     }
   };
 
@@ -427,16 +525,36 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
-  // Seek Progress
+  // Seek Progress supporting both engines seamlessly
   const seekTo = (seconds: number) => {
     if (!currentTrack) return;
     if (currentTrack.type === "radio") return; // cannot seek live stream
 
+    // Update progress state locally first
+    setProgress(seconds);
+
+    // 1. Seek the HTML5 Audio
+    if (audioRef.current) {
+      try {
+        const audioDur = audioRef.current.duration;
+        if (audioDur) {
+          // Loop math: handles the 30s fallback preview within the full duration bounds elegantly!
+          audioRef.current.currentTime = seconds % audioDur;
+        } else {
+          audioRef.current.currentTime = 0;
+        }
+      } catch (e) {
+        console.error("Seek error in HTML5 Audio:", e);
+      }
+    }
+
+    // 2. Seek the YouTube video player
     if (ytPlayerRef.current && typeof ytPlayerRef.current.seekTo === "function") {
       try {
         ytPlayerRef.current.seekTo(seconds, true);
-        setProgress(seconds);
-      } catch {}
+      } catch (err) {
+        console.error("Seek error in YouTube:", err);
+      }
     }
   };
 

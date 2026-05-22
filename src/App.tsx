@@ -397,7 +397,7 @@ const MainLayout: React.FC = () => {
         </div>
         
         {/* The persistent YouTube iframe mount point */}
-        <div className={`flex-1 bg-black relative ${showTerminal ? 'block' : 'hidden'}`}>
+        <div className={`bg-black relative ${showTerminal ? 'flex-1 block h-full w-full' : 'absolute pointer-events-none opacity-0 w-64 h-48 -left-[9999px] -top-[9999px]'}`}>
           <div id="bjcmusic-yt-player-target" className="absolute inset-0 w-full h-full pointer-events-auto" />
         </div>
       </div>
