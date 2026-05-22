@@ -165,12 +165,23 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const audio = new Audio();
     audioRef.current = audio;
 
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-    const onDurationChange = () => setDuration(audio.duration || 0);
+    const onPlay = () => {
+      if (activeEngineRef.current !== "youtube") {
+        setIsPlaying(true);
+      }
+    };
+    const onPause = () => {
+      if (activeEngineRef.current !== "youtube") {
+        setIsPlaying(false);
+      }
+    };
+    const onDurationChange = () => {
+      if (activeEngineRef.current !== "youtube") {
+        setDuration(audio.duration || 0);
+      }
+    };
     const onEnded = () => {
-      // For radio streams or non-looping standard tracks
-      if (!audio.loop) {
+      if (activeEngineRef.current !== "youtube" && !audio.loop) {
         nextTrackRef.current();
       }
     };
@@ -208,7 +219,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       try {
         ytPlayerRef.current = new window.YT.Player("bjcmusic-yt-player-target", {
-          host: "https://www.youtube-nocookie.com",
+          host: "https://www.youtube.com",
           height: "100%",
           width: "100%",
           videoId: "jfKfPfyJRdk", // starting neutral lofi video
@@ -295,12 +306,10 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === "function") {
               try {
                 const state = ytPlayerRef.current.getPlayerState();
-                if (state === 1) { // Playing
-                  setProgress(ytPlayerRef.current.getCurrentTime() || 0);
-                  const dur = ytPlayerRef.current.getDuration() || 0;
-                  if (dur > 0) {
-                    setDuration(prev => prev !== dur ? dur : prev);
-                  }
+                setProgress(ytPlayerRef.current.getCurrentTime() || 0);
+                const dur = ytPlayerRef.current.getDuration() || 0;
+                if (dur > 0) {
+                  setDuration(prev => prev !== dur ? dur : prev);
                 }
               } catch {}
             }

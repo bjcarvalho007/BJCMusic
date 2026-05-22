@@ -71,6 +71,7 @@ const ytCache: Record<string, string> = {
 // In-Memory caches for smart recommendations and lyrics (prevents exceeding Gemini free-tier daily quotas)
 const recCache: Record<string, any> = {};
 const lyricsCache: Record<string, string> = {};
+const searchCache: Record<string, any> = {};
 
 // Curated local songs catalog to make search and playback 100% resilient
 const LOCAL_SONGS_CATALOG = [
@@ -104,140 +105,206 @@ const LOCAL_SONGS_CATALOG = [
   { id: "lofi_3", title: "Sunset Lover", artist: "Petit Biscuit", album: "Presence", coverUrl: "https://images.unsplash.com/photo-1501386761578-eac5c94b800a?w=400", youtubeId: "3ZleK7NfMec", duration: 237, type: "song" }
 ];
 
-// API: Search music metadata via public Deezer endpoints
+// API: Search music metadata via public Deezer endpoints + direct YouTube search via Gemini Search Grounding
 app.get("/api/search", async (req, res) => {
   const query = (req.query.q as string || "").trim();
   if (!query) {
     return res.json({ data: [] });
   }
 
-  // Pre-search: check matching items in our local pre-cached high-quality database
-  const cleanQ = query.toLowerCase();
-  const localMatches = LOCAL_SONGS_CATALOG.filter(t => 
-    t.title.toLowerCase().includes(cleanQ) || 
-    t.artist.toLowerCase().includes(cleanQ) || 
-    t.album.toLowerCase().includes(cleanQ)
-  );
-
-  try {
-    const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
-    });
-    if (!response.ok) {
-      throw new Error(`Deezer API returned ${response.status}`);
+  // Helper to extract YouTube video ID from links or raw 11-char strings
+  const getYoutubeId = (q: string) => {
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const match = q.match(regExp);
+    if (match && match[2] && match[2].length === 11) {
+      return match[2];
+    } else if (q.length === 11 && /^[a-zA-Z0-9_-]{11}$/.test(q)) {
+      return q;
     }
-    const result = await response.json();
-    
-    // Check if Deezer returned an error block inside HTTP 200 (e.g. rate-limited, blocked, etc.)
-    if (result.error) {
-      throw new Error(`Deezer API returned error: ${result.error.message || JSON.stringify(result.error)}`);
-    }
+    return null;
+  };
 
-    // Transform to our Track model schema
-    const tracks = (result.data || []).map((t: any) => ({
-      id: `dz_${t.id}`,
-      title: t.title,
-      artist: t.artist.name,
-      album: t.album.title,
-      coverUrl: t.album.cover_medium || t.album.cover_big || "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?w=400",
-      youtubeId: "", // Will be resolved dynamically when selected
-      duration: t.duration,
-      type: 'song',
-      audioUrl: t.preview // Mapping direct high-fidelity audio preview for resilient HTML5 rendering
-    }));
+  const detectedYtId = getYoutubeId(query);
+  if (detectedYtId) {
+    console.log(`[YouTube Direct Link Decoder] Processing YouTube link/ID: "${detectedYtId}"`);
+    let title = "Vídeo do YouTube";
+    let artist = "Canal do YouTube";
+    let duration = 210;
 
-    // Combine local catalog matches to guarantee playability at the very top of search results
-    const combinedTracks = [...localMatches];
-    tracks.forEach((t: any) => {
-      if (!combinedTracks.some(ct => ct.title.toLowerCase() === t.title.toLowerCase() && ct.artist.toLowerCase() === t.artist.toLowerCase())) {
-        combinedTracks.push(t);
-      }
-    });
-
-    // If matches are completely empty, trigger advanced Gemini dynamic search fallback rather than generic local catalogue fallback
-    if (combinedTracks.length === 0) {
-      throw new Error("Empty results from Deezer API and local matches cache.");
-    }
-
-    res.json({ data: combinedTracks });
-  } catch (error: any) {
-    console.error("Search error, trying advanced Gemini dynamic search fallback:", error);
-    
     if (ai) {
       try {
-        console.log(`Deezer search failed. Querying Gemini to generate matching songs for query "${query}"...`);
         const response = await ai.models.generateContent({
           model: "gemini-3.5-flash",
-          contents: `Suggested real, high-quality songs matching the query "${query}". Offer exactly 6 real, famous song results.
-Provide the response inside a JSON array matching this schema:
-[
-  { "title": "Song Title", "artist": "Artist Name", "album": "Album Name", "duration": 220 }
-]`,
+          contents: `I have a YouTube Video ID: "${detectedYtId}". Use Google Search tools to search for this exact video or official song title, artist/creator name, and estimated video duration in seconds. Return your findings as raw valid JSON in this format: { "title": "Song/Video Name", "artist": "Artist or Channel Name", "duration": 220 }. Output ONLY raw valid JSON matching this schema. No markdown formatting, no comments.`,
           config: {
+            tools: [{ googleSearch: {} }],
             responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  artist: { type: Type.STRING },
-                  album: { type: Type.STRING },
-                  duration: { type: Type.INTEGER }
-                },
-                required: ["title", "artist", "album", "duration"]
-              }
-            }
           }
         });
-
-        const text = response.text || "[]";
-        const aiSongs = JSON.parse(text);
-
-        if (aiSongs && aiSongs.length > 0) {
-          const transformed = aiSongs.map((s: any, idx: number) => {
-            const covers = [
-              "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?w=400",
-              "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400",
-              "https://images.unsplash.com/photo-1498038432885-c6f3f1b912ee?w=400",
-              "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=400",
-              "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=400",
-              "https://images.unsplash.com/photo-1518609878373-06d740f60d8b?w=400"
-            ];
-            return {
-              id: `ai_dz_${Math.random().toString(36).substr(2, 9)}_${idx}`,
-              title: s.title,
-              artist: s.artist,
-              album: s.album,
-              coverUrl: covers[idx % covers.length],
-              youtubeId: "", // resolved dynamically in real time
-              duration: s.duration,
-              type: "song",
-              audioUrl: "" // Will resolve fallback or play unmuted Youtube
-            };
-          });
-
-          const combined = [...localMatches];
-          transformed.forEach((t: any) => {
-            if (!combined.some(ct => ct.title.toLowerCase() === t.title.toLowerCase() && ct.artist.toLowerCase() === t.artist.toLowerCase())) {
-              combined.push(t);
-            }
-          });
-
-          return res.json({ data: combined, isFallback: false, source: "gemini" });
-        }
-      } catch (aiErr) {
-        console.error("Gemini search fallback failed too:", aiErr);
+        const parsed = JSON.parse(response.text || "{}");
+        if (parsed.title) title = parsed.title;
+        if (parsed.artist) artist = parsed.artist;
+        if (parsed.duration) duration = parseInt(parsed.duration) || 210;
+        console.log(`[YouTube Direct Link Decoder] Decoded successfully: "${title}" by "${artist}" (${duration}s)`);
+      } catch (err) {
+        console.warn("[YouTube Direct Link Decoder] Metadata lookup failed, using fallback:", err);
       }
     }
 
-    // Ultimate fallback if both fails, ensuring user always gets results
-    const fallbackResults = localMatches.length > 0 ? localMatches : LOCAL_SONGS_CATALOG;
-    res.json({ data: fallbackResults, isFallback: true, source: "local" });
+    const decodedTrack = {
+      id: `yt_link_${detectedYtId}`,
+      title: title,
+      artist: artist,
+      album: "Link Decodificado do YouTube",
+      coverUrl: `https://img.youtube.com/vi/${detectedYtId}/hqdefault.jpg`,
+      youtubeId: detectedYtId,
+      duration: duration,
+      type: "song"
+    };
+
+    return res.json({ data: [decodedTrack] });
   }
+
+  const cleanQuery = query.toLowerCase();
+  if (searchCache[cleanQuery]) {
+    console.log(`[Cache Hit] Serving cached search results for: "${cleanQuery}"`);
+    return res.json({ data: searchCache[cleanQuery] });
+  }
+
+  // Pre-search: check matching items in our local pre-cached high-quality database
+  const localMatches = LOCAL_SONGS_CATALOG.filter(t => 
+    t.title.toLowerCase().includes(cleanQuery) || 
+    t.artist.toLowerCase().includes(cleanQuery) || 
+    t.album.toLowerCase().includes(cleanQuery)
+  );
+
+  let deezerTracks: any[] = [];
+  let youtubeTracks: any[] = [];
+
+  // Parallelized requests for extreme speed!
+  const fetchDeezerPromise = (async () => {
+    try {
+      const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}`;
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      });
+      if (response.ok) {
+        const result = await response.json();
+        if (result && !result.error && result.data) {
+          deezerTracks = result.data.map((t: any) => ({
+            id: `dz_${t.id}`,
+            title: t.title,
+            artist: t.artist.name,
+            album: t.album.title,
+            coverUrl: t.album.cover_medium || t.album.cover_big || "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?w=400",
+            youtubeId: "", // will resolve on click
+            duration: t.duration,
+            type: 'song',
+            audioUrl: t.preview
+          }));
+        }
+      }
+    } catch (deezerErr) {
+      console.warn("Deezer search parallel fetch failed:", deezerErr);
+    }
+  })();
+
+  const fetchYoutubePromise = (async () => {
+    if (!ai) return;
+    try {
+      console.log(`[YouTube Gemini Integration] Fetching matching videos for "${query}" from YouTube...`);
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: `Search for top high-quality audio or video uploads (official music videos, lyric videos, live performances, or official audio tracks) specifically on YouTube matching the query "${query}".
+For each matching result, find the exact 11-character YouTube videoId, the song/video title, the artist/channel name, and the estimated duration of the video in seconds.
+Return the results in a JSON array matching this exact schema:
+[
+  {
+    "title": "Song Title",
+    "artist": "Artist or Channel Name",
+    "album": "YouTube Video",
+    "coverUrl": "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=400",
+    "youtubeId": "11-character video ID",
+    "duration": 220
+  }
+]
+Output ONLY raw valid JSON matching the schema. No markdown backticks, no other words.`,
+        config: {
+          tools: [{ googleSearch: {} }],
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                artist: { type: Type.STRING },
+                album: { type: Type.STRING },
+                coverUrl: { type: Type.STRING },
+                youtubeId: { type: Type.STRING },
+                duration: { type: Type.INTEGER }
+              },
+              required: ["title", "artist", "album", "coverUrl", "youtubeId", "duration"]
+            }
+          }
+        }
+      });
+
+      const text = response.text || "[]";
+      const parsed = JSON.parse(text);
+      if (parsed && Array.isArray(parsed)) {
+        youtubeTracks = parsed.map((v: any, index: number) => ({
+          id: `yt_${v.youtubeId || Math.random().toString(36).substr(2, 9)}_${index}`,
+          title: v.title,
+          artist: v.artist,
+          album: v.album || "YouTube Video",
+          coverUrl: v.youtubeId ? `https://img.youtube.com/vi/${v.youtubeId}/hqdefault.jpg` : (v.coverUrl || "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?w=400"),
+          youtubeId: v.youtubeId,
+          duration: v.duration || 200,
+          type: "song"
+        }));
+        console.log(`Successfully parsed ${youtubeTracks.length} YouTube results directly via Gemini Google Search.`);
+      }
+    } catch (ytErr) {
+      console.warn("YouTube Gemini search parallel fetch failed:", ytErr);
+    }
+  })();
+
+  // Wait for both to complete
+  await Promise.allSettled([fetchDeezerPromise, fetchYoutubePromise]);
+
+  // Combine results with local matches, youtubeTracks, and deezerTracks
+  const combined: any[] = [...localMatches];
+
+  // Helper to add unique tracks
+  const addIfUnique = (track: any) => {
+    const exists = combined.some(ct => 
+      (ct.youtubeId && track.youtubeId && ct.youtubeId === track.youtubeId) || 
+      (ct.title.toLowerCase() === track.title.toLowerCase() && ct.artist.toLowerCase() === track.artist.toLowerCase())
+    );
+    if (!exists) {
+      combined.push(track);
+    }
+  };
+
+  // Add all youtube direct results first to guarantee absolute direct YouTube integration!
+  youtubeTracks.forEach(addIfUnique);
+
+  // Add Deezer results to fill in rich metadata
+  deezerTracks.forEach(addIfUnique);
+
+  // Fallback if combined is empty
+  let finalTracks = combined;
+  if (finalTracks.length === 0) {
+    finalTracks = LOCAL_SONGS_CATALOG;
+  }
+
+  // Cache final results
+  searchCache[cleanQuery] = finalTracks;
+
+  res.json({ data: finalTracks });
 });
 
 // API: Direct MP3 Audio Stream Resolver
